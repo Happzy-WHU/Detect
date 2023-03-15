@@ -42,6 +42,47 @@ def is_similar_images(image1, image2):
     else:
         return False
 
+# 假设原始帧的检测结果为detections，需要插值n帧
+def interpolate_detections(proQueue, n):
+    boxes ,scores, classes= [], [], []
+    
+    for index in range(len(proQueue)):
+        if index != 0 and index != len(proQueue)-1:
+            continue
+        for i, det in enumerate(proQueue[index]["pred"]):
+            for *xyxy, conf, cls in reversed(det):
+                # 获取每一帧的检测框信息
+                boxes[index].append(xyxy)
+                scores[index].append(conf)
+                classes[index].append(cls)
+
+    # 对每个检测框的位置、置信度和类别进行插值
+    for i in range(1, n+1):
+        # 计算插值的比例
+        alpha = (n+1-i) / (n + 1)
+
+        # 线性插值
+        new_boxes = []
+        new_scores = []
+        new_classes = []
+        for j in range(len(boxes[0])):
+            x1 = alpha * boxes[0][j][0] + (1 - alpha) * boxes[-1][j][0]
+            y1 = alpha * boxes[0][j][1] + (1 - alpha) * boxes[-1][j][1]
+            x2 = alpha * boxes[0][j][2] + (1 - alpha) * boxes[-1][j][2]
+            y2 = alpha * boxes[0][j][3] + (1 - alpha) * boxes[-1][j][3]
+            new_boxes.append([x1, y1, x2, y2])
+
+            s1 = alpha * scores[0][j] + (1 - alpha) * scores[-1][j]
+            new_scores.append(s1)
+
+            c1 = alpha * classes[0][j] + (1 - alpha) * classes[-1][j]
+            new_classes.append(c1)
+
+        # 将插值后的检测框信息添加到检测结果中
+        new_detection = {'boxes': new_boxes, 'scores': new_scores, 'classes': new_classes}
+        proQueue["pred"].insert(-1, new_detection)
+
+    return proQueue["pred"]
 
 def detect(save_img=False):
     source, weights, view_img, save_txt, imgsz, trace = opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size, not opt.no_trace
@@ -100,29 +141,32 @@ def detect(save_img=False):
     save_path = "" 
     im_last = None
     im0 = None
+    state = 0
     
     for path, img, im0s, vid_cap in dataset:
         
         im0 = im0s
         
         frame_count += 1
+
+        img = torch.from_numpy(img).to(device)
+        img = img.half() if half else img.float()  # uint8 to fp16/32
+        img /= 255.0  # 0 - 255 to 0.0 - 1.0
+        if img.ndimension() == 3:
+            img = img.unsqueeze(0)
+
+        # Warmup
+        if device.type != 'cpu' and (old_img_b != img.shape[0] or old_img_h != img.shape[2] or old_img_w != img.shape[3]):
+            old_img_b = img.shape[0]
+            old_img_h = img.shape[2]
+            old_img_w = img.shape[3]
+            for i in range(3):
+                model(img, augment=opt.augment)[0]
+
+        proQueue = []
         if not is_similar_images(im_last, im0s) or frame_count == 4:
             im_last = im0s
             frame_count = 0
-            img = torch.from_numpy(img).to(device)
-            img = img.half() if half else img.float()  # uint8 to fp16/32
-            img /= 255.0  # 0 - 255 to 0.0 - 1.0
-            if img.ndimension() == 3:
-                img = img.unsqueeze(0)
-
-            # Warmup
-            if device.type != 'cpu' and (old_img_b != img.shape[0] or old_img_h != img.shape[2] or old_img_w != img.shape[3]):
-                old_img_b = img.shape[0]
-                old_img_h = img.shape[2]
-                old_img_w = img.shape[3]
-                for i in range(3):
-                    model(img, augment=opt.augment)[0]
-
             # Inference
             t1 = time_synchronized()
             with torch.no_grad():   # Calculating gradients would cause a GPU memory leak
@@ -136,13 +180,24 @@ def detect(save_img=False):
             # Apply Classifier
             if classify:
                 pred = apply_classifier(pred, modelc, img, im0s)
-
+            if state != 0:
+                proQueue.append({"pred":pred, "im0s":im0s})
+                interpolate_detections(proQueue, state)
+                state = 0
+            proQueue.clear()
+            proQueue.append({"pred":pred, "im0s":im0s})
+        else:
+            state+=1
+            proQueue.append({"pred":pred, "im0s":im0s})
+            continue
+        
+        for item in proQueue:
             # Process detections
-            for i, det in enumerate(pred):  # detections per image
+            for i, det in enumerate(item["pred"]):  # detections per image
                 if webcam:  # batch_size >= 1
-                    p, s, im0, frame = path[i], '%g: ' % i, im0s[i].copy(), dataset.count
+                    p, s, im0, frame = path[i], '%g: ' % i, item["im0s"][i].copy(), dataset.count
                 else:
-                    p, s, im0, frame = path, '', im0s, getattr(dataset, 'frame', 0)
+                    p, s, im0, frame = path, '', item["im0s"], getattr(dataset, 'frame', 0)
 
                 p = Path(p)  # to Path
                 save_path = str(save_dir / p.name)  # img.jpg
@@ -177,25 +232,25 @@ def detect(save_img=False):
                     cv2.imshow(str(p), im0)
                     cv2.waitKey(1)  # 1 millisecond
 
-        # Save results (image with detections)
-        if save_img:
-            if dataset.mode == 'image':
-                cv2.imwrite(save_path, im0)
-                print(f" The image with the result is saved in: {save_path}")
-            else:  # 'video' or 'stream'
-                if vid_path != save_path:  # new video
-                    vid_path = save_path
-                    if isinstance(vid_writer, cv2.VideoWriter):
-                        vid_writer.release()  # release previous video writer
-                    if vid_cap:  # video
-                        fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                        w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                        h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    else:  # stream
-                        fps, w, h = 30, im0.shape[1], im0.shape[0]
-                        save_path += '.mp4'
-                    vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                vid_writer.write(im0)
+            # Save results (image with detections)
+            if save_img:
+                if dataset.mode == 'image':
+                    cv2.imwrite(save_path, im0)
+                    print(f" The image with the result is saved in: {save_path}")
+                else:  # 'video' or 'stream'
+                    if vid_path != save_path:  # new video
+                        vid_path = save_path
+                        if isinstance(vid_writer, cv2.VideoWriter):
+                            vid_writer.release()  # release previous video writer
+                        if vid_cap:  # video
+                            fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                            w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                            h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        else:  # stream
+                            fps, w, h = 30, im0.shape[1], im0.shape[0]
+                            save_path += '.mp4'
+                        vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                    vid_writer.write(im0)
 
     if save_txt or save_img:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
