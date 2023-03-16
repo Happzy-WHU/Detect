@@ -17,6 +17,7 @@ from utils.torch_utils import select_device, load_classifier, time_synchronized,
 from PIL import Image 
 import imagehash
 import numpy as np
+import copy
 
 # 相似返回True，否则返回False
 def is_similar_images(image1, image2):
@@ -152,7 +153,6 @@ def detect(save_img=False):
     proQueue = []
     staticCount = 0
     
-    
     for path, img, im0s, vid_cap in dataset:
         
         im0 = im0s
@@ -190,13 +190,13 @@ def detect(save_img=False):
             if classify:
                 pred = apply_classifier(pred, modelc, img, im0s)
             
-            proQueue.append({"pred":pred, "im0s":im0s})
+            proQueue.append({"pred":pred, "im0s":im0s, "img":img})
             if state != 0:
                 proQueue = insert_det(proQueue, state)
             
         else:
             state+=1
-            proQueue.append({"pred":[], "im0s":im0s})
+            proQueue.append({"pred":[], "im0s":im0s, "img":img})
             continue
         
         if len(proQueue) * state:
@@ -216,7 +216,10 @@ def detect(save_img=False):
                 gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
                 if len(det):
                     # Rescale boxes from img_size to im0 size
-                    det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
+                    itemPred = None
+                    if item is proQueue[len(proQueue)-1]:
+                        itemPred = copy.deepcopy(item["pred"])
+                    det[:, :4] = scale_coords(item["img"].shape[2:], det[:, :4], im0.shape).round()
 
                     # Print results
                     for c in det[:, -1].unique():
@@ -263,21 +266,20 @@ def detect(save_img=False):
                         vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
                     vid_writer.write(im0)
                 staticCount+=1
-        proQueue.clear()
-        proQueue.append({"pred":pred, "im0s":im0s})
+            
+            if item is proQueue[len(proQueue)-1]:
+                proQueue.clear()
+                proQueue.append({"pred":itemPred, "im0s":im0s, "img":img})
+    
     if save_txt or save_img:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
-        #print(f"Results saved to {save_dir}{s}")
 
     print(f'Done. ({time.time() - t0:.3f}s)')
-    print('-------------------------------------------')
-    print("staticCount:%i"%staticCount)
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', nargs='+', type=str, default='weights/yolov7-tiny.pt', help='model.pt path(s)')
-    parser.add_argument('--source', type=str, default='output.mp4', help='source')  # file/folder, 0 for webcam
+    parser.add_argument('--source', type=str, default='detect.mp4', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--img-size', type=int, default=1024, help='inference size (pixels)')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='IOU threshold for NMS')
