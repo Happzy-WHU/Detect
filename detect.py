@@ -81,6 +81,9 @@ def match_boxes(list1, list2):
 def insert_det(proQueue, n):
     leftDet = proQueue[0]["pred"]
     rightDet = proQueue[len(proQueue)-1]["pred"]
+    if len(leftDet)*len(rightDet) == 0:
+        return proQueue
+    
     b1, b2 = match_boxes(list(leftDet[0]), list(rightDet[0]))
     for i in range(1,n+1):
         if i == 1:
@@ -216,7 +219,7 @@ def detect(save_img=False):
                 gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
                 if len(det):
                     # Rescale boxes from img_size to im0 size
-                    itemPred = None
+                    itemPred = []
                     if item is proQueue[len(proQueue)-1]:
                         itemPred = copy.deepcopy(item["pred"])
                     det[:, :4] = scale_coords(item["img"].shape[2:], det[:, :4], im0.shape).round()
