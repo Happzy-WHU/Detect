@@ -16,6 +16,7 @@ from utils.torch_utils import select_device, load_classifier, time_synchronized,
 
 from PIL import Image 
 import imagehash
+import numpy as np
 
 # 相似返回True，否则返回False
 def is_similar_images(image1, image2):
@@ -42,47 +43,67 @@ def is_similar_images(image1, image2):
     else:
         return False
 
-# 假设原始帧的检测结果为detections，需要插值n帧
-def interpolate_detections(proQueue, n):
-    boxes ,scores, classes= [], [], []
-    
-    for index in range(len(proQueue)):
-        if index != 0 and index != len(proQueue)-1:
-            continue
-        for i, det in enumerate(proQueue[index]["pred"]):
-            for *xyxy, conf, cls in reversed(det):
-                # 获取每一帧的检测框信息
-                boxes[index].append(xyxy)
-                scores[index].append(conf)
-                classes[index].append(cls)
+def iou(box1, box2):
+    """
+    计算两个矩形框的IoU
+    :param box1: (x1, y1, x2, y2)，左上角和右下角坐标
+    :param box2: (x1, y1, x2, y2)，左上角和右下角坐标
+    :return: IoU值
+    """
+    # 计算重叠区域的左上角和右下角坐标
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
 
-    # 对每个检测框的位置、置信度和类别进行插值
-    for i in range(1, n+1):
-        # 计算插值的比例
-        alpha = (n+1-i) / (n + 1)
+    # 计算重叠区域的面积
+    overlap_area = max(0, x2 - x1 + 1) * max(0, y2 - y1 + 1)
 
-        # 线性插值
-        new_boxes = []
-        new_scores = []
-        new_classes = []
-        for j in range(len(boxes[0])):
-            x1 = alpha * boxes[0][j][0] + (1 - alpha) * boxes[-1][j][0]
-            y1 = alpha * boxes[0][j][1] + (1 - alpha) * boxes[-1][j][1]
-            x2 = alpha * boxes[0][j][2] + (1 - alpha) * boxes[-1][j][2]
-            y2 = alpha * boxes[0][j][3] + (1 - alpha) * boxes[-1][j][3]
-            new_boxes.append([x1, y1, x2, y2])
+    # 计算并集的面积
+    box1_area = (box1[2] - box1[0] + 1) * (box1[3] - box1[1] + 1)
+    box2_area = (box2[2] - box2[0] + 1) * (box2[3] - box2[1] + 1)
+    union_area = box1_area + box2_area - overlap_area
 
-            s1 = alpha * scores[0][j] + (1 - alpha) * scores[-1][j]
-            new_scores.append(s1)
+    # 计算IoU值
+    iou = overlap_area / union_area
 
-            c1 = alpha * classes[0][j] + (1 - alpha) * classes[-1][j]
-            new_classes.append(c1)
+    return iou
 
-        # 将插值后的检测框信息添加到检测结果中
-        new_detection = {'boxes': new_boxes, 'scores': new_scores, 'classes': new_classes}
-        proQueue["pred"].insert(-1, new_detection)
+def match_boxes(boxes1, boxes2, iou_threshold=0.5):
+    # 将两个检测框列表自动对应
+    num_boxes1, num_boxes2 = len(boxes1), len(boxes2)
+    if not num_boxes1*num_boxes2:
+        return [],[]
+    matches = np.zeros((num_boxes1, num_boxes2))
+    for i in range(num_boxes1):
+        for j in range(num_boxes2):
+            iou_score = iou(boxes1[i], boxes2[j])
+            if iou_score > iou_threshold:
+                matches[i][j] = iou_score
+    # 对于每个框，找到最大的匹配
+    b1, b2= [], []
+    for i in range(num_boxes1):
+        matched_index = np.argmax(matches[i])
+        if matches[i][matched_index] > 0:
+            b1.append(boxes1[i])
+            b2.append(boxes2[matched_index])
+    return b1, b2
 
-    return proQueue["pred"]
+# 插值实现平滑
+# torch.stack(list(leftDet[0]), dim=0)
+# torch.stack(b1, dim=0)
+def insert_det(proQueue, n):
+    leftDet = proQueue[0]["pred"]
+    rightDet = proQueue[len(proQueue)-1]["pred"]
+    b1, b2 = match_boxes(list(leftDet[0]), list(rightDet[0]))
+    for i in range(1,n+1):
+        if i == 1:
+            proQueue[i]["pred"].clear()
+        alpha = i/(n+1)
+        if len(b1) * len(b2):
+            proQueue[i]["pred"].append(torch.mul(torch.stack(b1, dim=0), 1-alpha)+torch.mul(torch.stack(b2, dim=0), alpha))
+
+    return proQueue
 
 def detect(save_img=False):
     source, weights, view_img, save_txt, imgsz, trace = opt.source, opt.weights, opt.view_img, opt.save_txt, opt.img_size, not opt.no_trace
@@ -142,6 +163,8 @@ def detect(save_img=False):
     im_last = None
     im0 = None
     state = 0
+    proQueue = []
+    
     
     for path, img, im0s, vid_cap in dataset:
         
@@ -163,7 +186,6 @@ def detect(save_img=False):
             for i in range(3):
                 model(img, augment=opt.augment)[0]
 
-        proQueue = []
         if not is_similar_images(im_last, im0s) or frame_count == 4:
             im_last = im0s
             frame_count = 0
@@ -180,17 +202,19 @@ def detect(save_img=False):
             # Apply Classifier
             if classify:
                 pred = apply_classifier(pred, modelc, img, im0s)
-            if state != 0:
-                proQueue.append({"pred":pred, "im0s":im0s})
-                interpolate_detections(proQueue, state)
-                state = 0
-            proQueue.clear()
+            
             proQueue.append({"pred":pred, "im0s":im0s})
+            if state != 0:
+                proQueue = insert_det(proQueue, state)
+            
         else:
             state+=1
             proQueue.append({"pred":pred, "im0s":im0s})
             continue
         
+        if len(proQueue) * state:
+            proQueue.pop(0)
+        state = 0
         for item in proQueue:
             # Process detections
             for i, det in enumerate(item["pred"]):  # detections per image
@@ -232,26 +256,27 @@ def detect(save_img=False):
                     cv2.imshow(str(p), im0)
                     cv2.waitKey(1)  # 1 millisecond
 
-            # Save results (image with detections)
-            if save_img:
-                if dataset.mode == 'image':
-                    cv2.imwrite(save_path, im0)
-                    print(f" The image with the result is saved in: {save_path}")
-                else:  # 'video' or 'stream'
-                    if vid_path != save_path:  # new video
-                        vid_path = save_path
-                        if isinstance(vid_writer, cv2.VideoWriter):
-                            vid_writer.release()  # release previous video writer
-                        if vid_cap:  # video
-                            fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                            w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                            h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        else:  # stream
-                            fps, w, h = 30, im0.shape[1], im0.shape[0]
-                            save_path += '.mp4'
-                        vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                    vid_writer.write(im0)
-
+                # Save results (image with detections)
+                if save_img:
+                    if dataset.mode == 'image':
+                        cv2.imwrite(save_path, im0)
+                        print(f" The image with the result is saved in: {save_path}")
+                    else:  # 'video' or 'stream'
+                        if vid_path != save_path:  # new video
+                            vid_path = save_path
+                            if isinstance(vid_writer, cv2.VideoWriter):
+                                vid_writer.release()  # release previous video writer
+                            if vid_cap:  # video
+                                fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                                w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                                h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                            else:  # stream
+                                fps, w, h = 30, im0.shape[1], im0.shape[0]
+                                save_path += '.mp4'
+                            vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                        vid_writer.write(im0)
+        proQueue.clear()
+        proQueue.append({"pred":pred, "im0s":im0s})
     if save_txt or save_img:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
         #print(f"Results saved to {save_dir}{s}")
