@@ -157,7 +157,6 @@ def detect(save_img=False):
     staticCount = 0
     
     for path, img, im0s, vid_cap in dataset:
-        
         im0 = im0s
         
         frame_count += 1
@@ -170,6 +169,7 @@ def detect(save_img=False):
 
         # Warmup
         if device.type != 'cpu' and (old_img_b != img.shape[0] or old_img_h != img.shape[2] or old_img_w != img.shape[3]):
+            
             old_img_b = img.shape[0]
             old_img_h = img.shape[2]
             old_img_w = img.shape[3]
@@ -202,7 +202,7 @@ def detect(save_img=False):
             proQueue.append({"pred":[], "im0s":im0s, "img":img})
             continue
         
-        if len(proQueue) * state:
+        if len(proQueue) * state or (state == 0 and len(proQueue)>1):
             proQueue.pop(0)
         state = 0
         for item in proQueue:
@@ -270,10 +270,12 @@ def detect(save_img=False):
                     vid_writer.write(im0)
                 staticCount+=1
             
+            
             if item is proQueue[len(proQueue)-1]:
                 proQueue.clear()
                 proQueue.append({"pred":itemPred, "im0s":im0s, "img":img})
-    
+        pass
+
     if save_txt or save_img:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
 
