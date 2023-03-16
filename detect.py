@@ -43,51 +43,36 @@ def is_similar_images(image1, image2):
     else:
         return False
 
-def iou(box1, box2):
-    """
-    计算两个矩形框的IoU
-    :param box1: (x1, y1, x2, y2)，左上角和右下角坐标
-    :param box2: (x1, y1, x2, y2)，左上角和右下角坐标
-    :return: IoU值
-    """
-    # 计算重叠区域的左上角和右下角坐标
-    x1 = max(box1[0], box2[0])
-    y1 = max(box1[1], box2[1])
-    x2 = min(box1[2], box2[2])
-    y2 = min(box1[3], box2[3])
-
-    # 计算重叠区域的面积
-    overlap_area = max(0, x2 - x1 + 1) * max(0, y2 - y1 + 1)
-
-    # 计算并集的面积
-    box1_area = (box1[2] - box1[0] + 1) * (box1[3] - box1[1] + 1)
-    box2_area = (box2[2] - box2[0] + 1) * (box2[3] - box2[1] + 1)
-    union_area = box1_area + box2_area - overlap_area
-
-    # 计算IoU值
-    iou = overlap_area / union_area
-
+def calculate_iou(box1, box2):
+    # 计算两个框的交集面积
+    inter_x1 = max(box1[0], box2[0])
+    inter_y1 = max(box1[1], box2[1])
+    inter_x2 = min(box1[2], box2[2])
+    inter_y2 = min(box1[3], box2[3])
+    inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
+    
+    
+    # 计算两个框的并集面积
+    area_box_1 = abs((box1[2] - box1[0]) * (box1[3] - box1[1]))
+    area_box_2 = abs((box2[2] - box2[0]) * (box2[3] - box2[1]))
+    
+    union_area = area_box_1 + area_box_2 - inter_area
+    
+    # 计算IoU
+    iou = inter_area / union_area
+    
     return iou
 
-def match_boxes(boxes1, boxes2, iou_threshold=0.5):
-    # 将两个检测框列表自动对应
-    num_boxes1, num_boxes2 = len(boxes1), len(boxes2)
-    if not num_boxes1*num_boxes2:
-        return [],[]
-    matches = np.zeros((num_boxes1, num_boxes2))
-    for i in range(num_boxes1):
-        for j in range(num_boxes2):
-            iou_score = iou(boxes1[i], boxes2[j])
-            if iou_score > iou_threshold:
-                matches[i][j] = iou_score
-    # 对于每个框，找到最大的匹配
-    b1, b2= [], []
-    for i in range(num_boxes1):
-        matched_index = np.argmax(matches[i])
-        if matches[i][matched_index] > 0:
-            b1.append(boxes1[i])
-            b2.append(boxes2[matched_index])
-    return b1, b2
+def match_boxes(list1, list2):
+    b1,b2 = [],[]
+    for box1 in list1:
+        for box2 in list2:
+            if box1[5] == box2[5]: # 检查类别是否相同
+                iou = calculate_iou(box1[:4], box2[:4]) # 计算两个框的IoU
+                if iou > 0.2: # 如果IoU大于阈值，则认为两个框匹配
+                    b1.append(box1)
+                    b2.append(box2)
+    return b1,b2
 
 # 插值实现平滑
 # torch.stack(list(leftDet[0]), dim=0)
@@ -101,6 +86,7 @@ def insert_det(proQueue, n):
             proQueue[i]["pred"].clear()
         alpha = i/(n+1)
         if len(b1) * len(b2):
+
             proQueue[i]["pred"].append(torch.mul(torch.stack(b1, dim=0), 1-alpha)+torch.mul(torch.stack(b2, dim=0), alpha))
 
     return proQueue
@@ -164,6 +150,7 @@ def detect(save_img=False):
     im0 = None
     state = 0
     proQueue = []
+    staticCount = 0
     
     
     for path, img, im0s, vid_cap in dataset:
@@ -209,7 +196,7 @@ def detect(save_img=False):
             
         else:
             state+=1
-            proQueue.append({"pred":pred, "im0s":im0s})
+            proQueue.append({"pred":[], "im0s":im0s})
             continue
         
         if len(proQueue) * state:
@@ -256,25 +243,26 @@ def detect(save_img=False):
                     cv2.imshow(str(p), im0)
                     cv2.waitKey(1)  # 1 millisecond
 
-                # Save results (image with detections)
-                if save_img:
-                    if dataset.mode == 'image':
-                        cv2.imwrite(save_path, im0)
-                        print(f" The image with the result is saved in: {save_path}")
-                    else:  # 'video' or 'stream'
-                        if vid_path != save_path:  # new video
-                            vid_path = save_path
-                            if isinstance(vid_writer, cv2.VideoWriter):
-                                vid_writer.release()  # release previous video writer
-                            if vid_cap:  # video
-                                fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                                w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                                h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                            else:  # stream
-                                fps, w, h = 30, im0.shape[1], im0.shape[0]
-                                save_path += '.mp4'
-                            vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                        vid_writer.write(im0)
+            # Save results (image with detections)
+            if save_img:
+                if dataset.mode == 'image':
+                    cv2.imwrite(save_path, im0)
+                    print(f" The image with the result is saved in: {save_path}")
+                else:  # 'video' or 'stream'
+                    if vid_path != save_path:  # new video
+                        vid_path = save_path
+                        if isinstance(vid_writer, cv2.VideoWriter):
+                            vid_writer.release()  # release previous video writer
+                        if vid_cap:  # video
+                            fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                            w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                            h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        else:  # stream
+                            fps, w, h = 30, im0.shape[1], im0.shape[0]
+                            save_path += '.mp4'
+                        vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                    vid_writer.write(im0)
+                staticCount+=1
         proQueue.clear()
         proQueue.append({"pred":pred, "im0s":im0s})
     if save_txt or save_img:
@@ -282,12 +270,14 @@ def detect(save_img=False):
         #print(f"Results saved to {save_dir}{s}")
 
     print(f'Done. ({time.time() - t0:.3f}s)')
+    print('-------------------------------------------')
+    print("staticCount:%i"%staticCount)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', nargs='+', type=str, default='weights/yolov7-tiny.pt', help='model.pt path(s)')
-    parser.add_argument('--source', type=str, default='detect.mp4', help='source')  # file/folder, 0 for webcam
+    parser.add_argument('--source', type=str, default='output.mp4', help='source')  # file/folder, 0 for webcam
     parser.add_argument('--img-size', type=int, default=1024, help='inference size (pixels)')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='IOU threshold for NMS')
